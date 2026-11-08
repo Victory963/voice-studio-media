@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的配音工作台</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; padding: 20px 16px 48px; max-width: 760px; margin-inline: auto; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .sub { opacity: .65; font-size: 13px; margin-bottom: 16px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #999; vertical-align: middle; margin-right: 5px; }
+  .dot.ok { background: #2fbf71; } .dot.bad { background: #e5484d; }
+  textarea { width: 100%; min-height: 180px; font-size: 17px; line-height: 1.7; padding: 14px; border-radius: 12px; border: 1px solid #8884; resize: vertical; }
+  .row { display: flex; align-items: center; gap: 14px; margin: 14px 0; flex-wrap: wrap; }
+  .count { font-size: 13px; opacity: .6; margin-left: auto; }
+  button#go { font-size: 18px; font-weight: 600; padding: 13px 34px; border: 0; border-radius: 12px; background: #2f7cf6; color: #fff; cursor: pointer; }
+  button#go:disabled { opacity: .45; cursor: wait; }
+  input[type=range] { width: 130px; }
+  select#lang { font-size: 15px; padding: 7px 10px; border-radius: 9px; }
+  .card { border: 1px solid #8883; border-radius: 12px; padding: 14px 16px; margin-top: 16px; display: none; }
+  .card.show { display: block; }
+  .step { font-size: 14px; opacity: .8; }
+  .badge { font-size: 12px; padding: 2px 9px; border-radius: 999px; margin-left: 8px; }
+  .badge.pass { background: #2fbf7133; color: #1d9e5f; }
+  .badge.warn { background: #f5a62333; color: #b97a0e; }
+  .badge.fail { background: #e5484d33; color: #e5484d; }
+  audio { width: 100%; margin-top: 10px; }
+  .dl { display: inline-block; margin-top: 10px; font-size: 15px; }
+  .err { color: #e5484d; font-size: 14px; white-space: pre-wrap; }
+  .warn { color: #b97a0e; font-size: 13px; }
+  .hist { margin-top: 28px; } .hist h2 { font-size: 16px; }
+  .hist a { display: block; padding: 7px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>🎙️ 我的配音工作台</h1>
+<div class="sub"><span class="dot" id="dot"></span><span id="stat">正在检查声音引擎…</span> · 生成的是你自己的声音，拍完视频直接套用</div>
+
+<textarea id="text" placeholder="把要配音的文案粘贴到这里，中文 / 日语 / 英语 / 韩语 / 粤语都可以，长文会自动分句生成再拼好…"></textarea>
+<div class="row">
+  <button id="go">一键生成配音</button>
+  <label style="font-size:14px">语言
+    <select id="lang">
+      <option value="auto" selected>自动识别</option>
+      <option value="zh">中文</option>
+      <option value="ja">日本語</option>
+      <option value="en">English</option>
+      <option value="ko">한국어</option>
+      <option value="yue">粤语</option>
+    </select>
+  </label>
+  <label style="font-size:14px">语速 <input type="range" id="speed" min="0.8" max="1.2" step="0.05" value="1"> <span id="speedv">1.00×</span></label>
+  <span class="count" id="count">0 字</span>
+</div>
+
+<div class="card" id="card">
+  <div class="step" id="step"></div>
+  <div class="err" id="err"></div>
+  <div id="result"></div>
+</div>
+
+<div class="hist" id="hist" style="display:none">
+  <h2>本次生成的成品</h2>
+  <div id="histlist"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const textEl = $("#text");
+textEl.addEventListener("input", () => $("#count").textContent = textEl.value.trim().length + " 字");
+$("#speed").addEventListener("input", e => $("#speedv").textContent = Number(e.target.value).toFixed(2) + "×");
+
+async function fetchTimeout(url, opts = {}, ms = 6000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctl.signal }); }
+  finally { clearTimeout(t); }
+}
+
+async function checkStatus() {
+  try {
+    const r = await (await fetchTimeout("/api/status")).json();
+    if (r.engine_up && r.ref_ready) {
+      $("#dot").className = "dot ok";
+      $("#stat").textContent = "声音引擎就绪";
+    } else if (!r.engine_up) {
+      $("#dot").className = "dot bad";
+      $("#stat").textContent = "工作台已连接，但声音引擎未启动或还在加载 — 请看 VoiceEngine 黑窗口，等它加载完（约1分钟）再刷新本页";
+    } else {
+      $("#dot").className = "dot bad";
+      $("#stat").textContent = "声音样本未就绪";
+    }
+  } catch {
+    $("#dot").className = "dot bad";
+    $("#stat").textContent = "连不上工作台服务 — VoiceStudio 黑窗口没在运行：请重新双击 Step2，两个黑窗口都不要关，再刷新本页";
+  }
+}
+checkStatus(); setInterval(checkStatus, 8000);
+
+let polling = null;
+$("#go").addEventListener("click", async () => {
+  const text = textEl.value.trim();
+  if (!text) { alert("先输入要配音的文字"); return; }
+  $("#go").disabled = true;
+  $("#card").className = "card show"; $("#err").textContent = ""; $("#result").innerHTML = "";
+  $("#step").textContent = "已提交，开始生成…";
+  let r;
+  try {
+    r = await (await fetchTimeout("/api/generate", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, speed: Number($("#speed").value), lang: $("#lang").value }) }, 15000)).json();
+  } catch {
+    $("#err").textContent = "提交失败：连不上工作台服务。请确认 Step2 的两个黑窗口都开着，然后刷新页面重试。";
+    $("#go").disabled = false;
+    return;
+  }
+  if (r.error) { $("#err").textContent = r.error; $("#go").disabled = false; return; }
+  clearInterval(polling);
+  polling = setInterval(async () => {
+    let j;
+    try { j = await (await fetchTimeout("/api/job/" + r.job_id)).json(); }
+    catch { $("#step").textContent = "暂时连不上工作台服务，正在重试…（黑窗口不要关）"; return; }
+    $("#step").textContent = j.step || j.status;
+    if (j.status === "done") {
+      clearInterval(polling); $("#go").disabled = false;
+      const badge = j.check === "passed" ? '<span class="badge pass">内容校验通过</span>'
+                  : '<span class="badge warn">已生成，校验有提示</span>';
+      $("#step").innerHTML = "生成完成" + badge;
+      $("#result").innerHTML =
+        `<audio controls src="${j.url}"></audio>
+         <a class="dl" href="${j.url}" download>⬇ 下载 MP3（拖进剪辑软件就能用）</a>` +
+        (j.warnings && j.warnings.length ? `<div class="warn">${j.warnings.join("<br>")}</div>` : "");
+      const a = document.createElement("a");
+      a.href = j.url; a.textContent = "🎧 " + new Date().toLocaleTimeString() + " · " + text.slice(0, 24) + "…";
+      a.download = "";
+      $("#histlist").prepend(a); $("#hist").style.display = "block";
+    } else if (j.status === "error") {
+      clearInterval(polling); $("#go").disabled = false;
+      $("#step").innerHTML = "生成未完成" + '<span class="badge fail">已拦截</span>';
+      $("#err").textContent = j.error || "未知错误";
+    }
+  }, 2500);
+});
+</script>
+</body>
+</html>
